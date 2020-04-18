@@ -27,10 +27,12 @@ __global__ void singleBlockLifeKernel(uint32_t *cols, int numGenerations) {
     uint8_t lastSides = 0, lastMiddle = 0, thisSides = 0, thisMiddle = 0,
             nextSides = 0, nextMiddle = 0;
 
+    // Get the nieghbors from the row below
     lastSides = grid[31 * 32 + leftIdx] & 1;
     lastSides += grid[31 * 32 + rightIdx] & 1;
     lastMiddle = grid[31 * 32 + colIdx];
 
+    // Get the neighbors in this row and the cell itself
     thisSides = grid[leftIdx] & 1;
     thisSides += grid[rightIdx] & 1;
     thisMiddle = grid[colIdx];
@@ -38,43 +40,53 @@ __global__ void singleBlockLifeKernel(uint32_t *cols, int numGenerations) {
     // Perform cellular automata
     for (int i = 0; i < 31; ++i) {
 
+      // Get the neighbors in the next row
       nextSides = grid[(i + 1) * 32 + leftIdx] & 1;
       nextSides += grid[(i + 1) * 32 + rightIdx] & 1;
       nextMiddle = grid[(i + 1) * 32 + colIdx];
 
+      // Calculate the numbers of neighbors still alive
       uint8_t neighbors =
           lastSides + lastMiddle + thisSides + nextSides + nextMiddle;
 
+      // Write the next state directly to the memory location already allocated
+      // for this square, just in a differnt bit
+      // TODO Maybe just make this a macro?
       grid[i * 32 + colIdx] |=
           (~neighbors >> 1 & neighbors & (thisMiddle | neighbors) << 1) & 2;
 
+      // The current row becomes the last row, mutatis mutandis for the next row
       lastSides = thisSides;
       lastMiddle = thisMiddle;
       thisSides = nextSides;
       thisMiddle = nextMiddle;
     }
 
+    // The next row for the last row in the cell will be the dame as the first
+    // row
     nextSides = grid[leftIdx] & 1;
     nextSides += grid[rightIdx] & 1;
     nextMiddle = grid[colIdx] & 1;
 
+    // Compute the number of neighbors for this row
     uint8_t neighbors =
         lastSides + lastMiddle + thisSides + nextSides + nextMiddle;
 
+    // Write the next state directly to the memory location already allocated
+    // for this square, just in a differnt bit
     grid[31 * 32 + colIdx] |=
         (~neighbors >> 1 & neighbors & (thisMiddle | neighbors) << 1) & 2;
 
+    // Make sure all threads have finished the current generation before starting the next generation
     __syncthreads();
 
+    // Shift the next state of the cell into the current state of the cell
     for (int i = 0; i < 32; ++i) {
       grid[i * 32 + colIdx] >>= 1;
     }
-
-    // for(int i = 0; i < 32; ++i) {
-    //   grid[i*32 + colIdx] |= ~grid[i*32 + leftIdx] << 1;
-    // }
   }
 
+  // Clear the register to store compacted data
   colData = 0;
 
   // Cram the data back into a single value
@@ -94,7 +106,7 @@ void generateGrid(uint32_t *&cols) {
   srand(seed);
 
   for (int i = 0; i < 32; ++i) {
-    cols[i] = rand() & 0xFFFFFFFF;
+    cols[i] = rand() & rand() & 0xFFFFFFFF;
   }
 }
 
