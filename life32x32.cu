@@ -3,6 +3,9 @@
 #include <stdlib.h>
 #include <unistd.h>
 
+static int SLEEP_TIME = 50000;
+static int GENERATION_STEP = 1;
+
 __global__ void singleBlockLifeKernel(uint32_t *cols, int numGenerations) {
   __shared__ uint8_t grid[1024]; // TODO Should this be uint32_t?
 
@@ -61,6 +64,12 @@ __global__ void singleBlockLifeKernel(uint32_t *cols, int numGenerations) {
     grid[31 * 32 + colIdx] |=
         (~neighbors >> 1 & neighbors & (thisMiddle | neighbors) << 1) & 2;
 
+    __syncthreads();
+
+    for (int i = 0; i < 32; ++i) {
+      grid[i * 32 + colIdx] >>= 1;
+    }
+
     // for(int i = 0; i < 32; ++i) {
     //   grid[i*32 + colIdx] |= ~grid[i*32 + leftIdx] << 1;
     // }
@@ -70,7 +79,7 @@ __global__ void singleBlockLifeKernel(uint32_t *cols, int numGenerations) {
 
   // Cram the data back into a single value
   for (int i = 0; i < 32; ++i) {
-    colData |= ((grid[i * 32 + colIdx] >> 1) & 1) << i;
+    colData |= ((grid[i * 32 + colIdx]) & 1) << i;
   }
 
   // Copy the data back into global memory
@@ -98,10 +107,17 @@ void drawGrid(uint32_t *col, int generation) {
     printf("\n");
   }
   printf("%d    ", generation);
-  usleep(50000);
+  usleep(SLEEP_TIME);
 }
 
-int main() {
+int main(int argc, char **argv) {
+
+  if (argc > 1)
+    GENERATION_STEP = std::stoi(argv[1]);
+
+  if (argc > 2)
+    SLEEP_TIME = std::stoi(argv[2]);
+
   uint32_t *cols;
   uint32_t generation = 0;
 
@@ -111,8 +127,8 @@ int main() {
   drawGrid(cols, generation);
 
   while (true) {
-    singleBlockLifeKernel<<<1, 32>>>(cols, 1);
-    generation += 1;
+    singleBlockLifeKernel<<<1, 32>>>(cols, GENERATION_STEP);
+    generation += GENERATION_STEP;
     cudaDeviceSynchronize();
     drawGrid(cols, generation);
   }
