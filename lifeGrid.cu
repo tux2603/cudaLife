@@ -15,31 +15,29 @@
 #define GRID_X_LOG2 2
 #define GRID_Y_LOG2 2
 
-#define SLEEP_TIME 50000
+#define SLEEP_TIME 100000
 
 #define GENERATION_STEP 1
 
 const char* outputVector[4] = {(char*)" ", (char*)"▀", (char*)"▄", (char*)"█"};
 
-__global__ void tiledLifeKernel(uint *cols, uint32_t numgenerations,
-                                uint16_t gridDimXLog2, uint16_t gridDimYLog2) {
+__global__ void tiledLifeKernel(uint *cols, uint32_t numgenerations) {
   // Allocate the local shared memory needed for the kernel. The memory will be
   // arranged in a 34x34 array, with a one byte padding at the end of every row
   // to prevent bank conflicts
-  __shared__ uint32_t cells[1190];
+  __shared__ uint8_t cells[1190];
   __shared__ uint32_t sidesData[2];
 
   // Get the grid group that will be used to synchronize the entire kernel
   // between generations
   cooperative_groups::grid_group grid = cooperative_groups::this_grid();
 
-  // Got the indexes needed to read the adjacent blocks, allowing for wrap
-  // around
-  uint32_t sideBlockX[2];
-  sideBlockX[0] = (blockIdx.x - 1) & (0xffffffff >> (32 - gridDimXLog2));
-  sideBlockX[1] = (blockIdx.x + 1) & (0xffffffff >> (32 - gridDimXLog2));
-  uint32_t topBlockY = (blockIdx.y - 1) & (0xffffffff >> (32 - gridDimYLog2));
-  uint32_t bottomBlockY = (blockIdx.y + 1) & (0xffffffff >> (32 - gridDimYLog2));
+  // Got the indexes needed to  << 24
+  uint16_t sideBlockX[2];
+  sideBlockX[0] = (blockIdx.x - 1) & (gridDim.x - 1);
+  sideBlockX[1] = (blockIdx.x + 1) & (gridDim.x - 1);
+  uint16_t topBlockY = (blockIdx.y + 1) & (gridDim.y - 1);
+  uint16_t bottomBlockY = (blockIdx.y - 1) & (gridDim.y - 1);
 
   // Load the col index to a register
   // TODO Hopefully won't run out of registers, but might want to banchmark this
@@ -48,7 +46,7 @@ __global__ void tiledLifeKernel(uint *cols, uint32_t numgenerations,
 
   // Load the data in the block itself
   uint32_t colData =
-      cols[(((blockIdx.y << gridDimXLog2) + blockIdx.x) << 5) + colIdx];
+      cols[(((blockIdx.y * gridDim.x) + blockIdx.x) << 5) + colIdx];
 
   for (uint8_t i = 0; i < 32; ++i) {
     cells[(i + 1) * 35 + colIdx + 1] = (colData >> i) & 0x1;
@@ -69,21 +67,21 @@ __global__ void tiledLifeKernel(uint *cols, uint32_t numgenerations,
       uint8_t offset = 0x1f * (~colIdx & 0x1);
 
       // Read amd save the top corners
-      uint32_t colIn =
-          cols[(((topBlockY << gridDimXLog2) + sideBlockX[colIdx]) << 5) +
+      colData =
+          cols[(((topBlockY * gridDim.x) + sideBlockX[colIdx]) << 5) +
                offset];
-      cells[colIdx * 33] = colIn >> 31;
+      cells[colIdx * 33] = colData >> 31;
 
       // Read the sides, they will be saved later by individual threads
       sidesData[colIdx] =
-          cols[(((blockIdx.y << gridDimXLog2) + sideBlockX[colIdx]) << 5) +
+          cols[(((blockIdx.y * gridDim.x) + sideBlockX[colIdx]) << 5) +
                offset];
 
       // Read and saved the bottom corners
-      colIn = 
-          cols[(((bottomBlockY << gridDimXLog2) + sideBlockX[colIdx]) << 5) +
+      colData = 
+          cols[(((bottomBlockY * gridDim.x) + sideBlockX[colIdx]) << 5) +
                offset];
-      cells[33 * 35 + colIdx * 33] = colIn & 0b1;
+      cells[33 * 35 + colIdx * 33] = colData & 0b1;
     }
 
     // #######################################################################
@@ -92,7 +90,7 @@ __global__ void tiledLifeKernel(uint *cols, uint32_t numgenerations,
 
     // Now that that divergent mess is done, sync everything back up
     // TODO: figure out if this is strictly necessary
-    __syncthreads();
+    //__syncthreads();
 
     // The left and right sides were loaded in in the divergent section, but
     // they can be transfered to the memory array in parallel
@@ -109,13 +107,15 @@ __global__ void tiledLifeKernel(uint *cols, uint32_t numgenerations,
 
     // Load in the neighbor above this column
     uint32_t colData = 
-        cols[(((topBlockY << gridDimXLog2) + blockIdx.x) << 5) + colIdx];
-    cells[colIdx + 1] = (colData >> 31) & 0x1;
+        cols[(((topBlockY * gridDim.x) + blockIdx.x) << 5) + colIdx];
+    cells[colIdx + 1] = colData >> 31;
 
     // Load in the neighbors below this column
     colData = 
-        cols[(((bottomBlockY << gridDimXLog2) + blockIdx.x) << 5) + colIdx];
+        cols[(((bottomBlockY * gridDim.x) + blockIdx.x) << 5) + colIdx];
     cells[33 * 35 + colIdx + 1] = colData & 0x1;
+
+    __syncthreads();
 
     // #######################################################################
     // ######                     END MEMORY LOADING                    ######
@@ -181,7 +181,7 @@ __global__ void tiledLifeKernel(uint *cols, uint32_t numgenerations,
 
     // Write the column data back to global memory so that other blocks can
     // access it
-    cols[(((blockIdx.y << gridDimXLog2) + blockIdx.x) << 5) + colIdx] = colData;
+    cols[(((blockIdx.y * gridDim.x) + blockIdx.x) << 5) + colIdx] = colData;
 
     // Synchronize all blocks in the kernel before starting on the next
     // generation
@@ -194,13 +194,33 @@ __global__ void tiledLifeKernel(uint *cols, uint32_t numgenerations,
 }
 
 void generateCells(uint32_t *cells, uint32_t length) {
-  uint32_t seed = std::chrono::duration_cast<std::chrono::milliseconds>(
-                      std::chrono::system_clock::now().time_since_epoch())
-                      .count();
-  srand(seed);
+  // uint32_t seed = std::chrono::duration_cast<std::chrono::milliseconds>(
+  //                     std::chrono::system_clock::now().time_since_epoch())
+  //                     .count();
+  // srand(seed);
 
-  for (uint32_t i = 0; i < length; ++i) {
-    cells[i] = (rand() + rand() + rand()) & (rand() + rand() + rand()) & 0xFFFFFFFF;
+  // for (uint32_t i = 0; i < length; ++i) {
+  //   cells[i] = (rand() + rand() + rand()) & (rand() + rand() + rand()) & 0xFFFFFFFF;
+  // }
+
+  for (uint32_t i = 0; i < length; i += 8) {
+    cells[i] = 0b0001 << 24;
+    cells[i+1] = 0b0110 << 24;
+    cells[i+2] = 0b0011 << 24;
+
+    cells[i] |= 0b0001 << 16;
+    cells[i+1] |= 0b0110 << 16;
+    cells[i+2] |= 0b0011 << 16;
+
+
+    cells[i] |= 0b0001 << 8;
+    cells[i+1] |= 0b0110 << 8;
+    cells[i+2] |= 0b0011 << 8;
+
+
+    cells[i] |= 0b0001 << 0;
+    cells[i+1] |= 0b0110 << 0;
+    cells[i+2] |= 0b0011 << 0;
   }
 }
 
@@ -208,10 +228,10 @@ void drawCells(uint32_t *cells, int generation, uint32_t sleepTime, uint16_t gri
                uint16_t gridDimYLog2) {
   printf("\033[H");
 
-  for (int b = 0; b < 1 << gridDimYLog2; ++b) {
+  for (int b = 0; b < 1 << GRID_Y_LOG2; ++b) {
     for (int y = 0; y < 32; y += 2) {
       // printf("\n\033[1;%dH", y+1);
-      for (int x = 0; x < (1 << gridDimXLog2) * 32; ++x) {
+      for (int x = 0; x < (1 << GRID_X_LOG2) * 32; ++x) {
         uint8_t cellsInBlock = 0;
         cellsInBlock = (cells[b * (1 << (gridDimXLog2 + 5)) + x] & (0x3l << y)) >> y;
         // bool lowerCell = (cells[b * (1 << (gridDimXLog2 + 5)) + x] & (0x1l << (y+1)) >> (y+1);
@@ -237,11 +257,9 @@ void launchKernel(uint32_t *cells, uint32_t numGenerations,
   blockDim.y = 1;
   blockDim.z = 1;
 
-  void **args = new void *[4];
+  void **args = new void *[2];
   args[0] = &cells;
   args[1] = &numGenerations;
-  args[2] = &gridDimXLog2;
-  args[3] = &gridDimYLog2;
 
   cudaLaunchCooperativeKernel((void *)tiledLifeKernel, gridDim, blockDim, args);
   cudaDeviceSynchronize();
